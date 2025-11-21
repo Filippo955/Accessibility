@@ -1,0 +1,216 @@
+library(dplyr)
+library(lavaan)
+library(lavaanPlot)
+library(lavaan)
+
+# (ISTAT, 2023)
+
+path <- file.choose()
+
+datiR_2022 <- read.delim(path, header = TRUE, stringsAsFactors = FALSE, check.names = FALSE)
+
+
+avq_clean <- datiR_2022 %>%
+  mutate(across(c(TRAF, PARCH ),
+                ~ ifelse(. == 5, NA, .)))
+
+
+invert_then_normalize <- function(x) {
+  if (all(is.na(x))) return(rep(NA, length(x)))
+  inv_x <- max(x, na.rm = TRUE) - x
+  rng <- range(inv_x, na.rm = TRUE)
+  (inv_x - rng[1]) / diff(rng)
+}
+
+avq_scaled <- avq_clean %>%
+  mutate(across(
+    c(
+      COLLEG, COLCO, COLCOM,
+      FRCMT, PUNMT, SEDMT, VELMT, PULMT, ATTMT, ORAMT, CBMT, INFMT,
+      FRTRE, PUTRE, PSTRE, VETRE, PULSTR, COMAT, COMORA, COBIG, INFTR,
+      FCORS, PUNT, POSSE, VELCO, PULIZ, COMOF, COMOR , CPSBI , SITE, RISEC),
+    invert_then_normalize,
+    .names = "norm_inv_{col}"
+  ))
+
+
+normalize <- function(x) {
+  rng <- range(x, na.rm = TRUE)
+  (x - rng[1]) / diff(rng)
+}
+
+avq_scaled <- avq_scaled %>%
+  mutate(across(c(PUNTIFI10, PUNTIFI8, PUNTIFI1, TRAF, PARCH), 
+                normalize, .names = "norm_{col}"))
+
+avq_scaled$Connection <- rowMeans(avq_scaled[, c( "norm_inv_COLLEG", "norm_inv_COLCO", "norm_inv_COLCOM")], na.rm = TRUE)
+avq_scaled$IND_CLEAN <- rowMeans(avq_scaled[, c("norm_inv_PULIZ", "norm_inv_PULMT", "norm_inv_PULSTR")], na.rm = TRUE)
+avq_scaled$IND_SPEED <- rowMeans(avq_scaled[, c("norm_inv_VELCO", "norm_inv_VELMT", "norm_inv_VETRE")], na.rm = TRUE)
+avq_scaled$IND_PUNCTUALITY <- rowMeans(avq_scaled[, c("norm_inv_PUNT", "norm_inv_PUNMT", "norm_inv_PUTRE")], na.rm = TRUE)
+avq_scaled$IND_SEATS <- rowMeans(avq_scaled[, c("norm_inv_POSSE", "norm_inv_SEDMT", "norm_inv_PSTRE")], na.rm = TRUE)
+avq_scaled$IND_WAITING <- rowMeans(avq_scaled[, c("norm_inv_COMOF", "norm_inv_ATTMT", "norm_inv_COMAT")], na.rm = TRUE)
+avq_scaled$IND_TIME <- rowMeans(avq_scaled[, c("norm_inv_COMOR", "norm_inv_ORAMT", "norm_inv_COMORA")], na.rm = TRUE)
+avq_scaled$IND_COST <- rowMeans(avq_scaled[, c("norm_inv_CPSBI", "norm_inv_CBMT", "norm_inv_COBIG")], na.rm = TRUE)
+
+
+rename_vec <- c(
+  WAITING = "IND_WAITING",
+  SPEED = "IND_SPEED",
+  SEATS = "IND_SEATS",
+  TIME = "IND_TIME",
+  COST = "IND_COST",
+  PUNCTUALITY = "IND_PUNCTUALITY",
+  CLEAN = "IND_CLEAN",
+  CONNECTION = "Connection",
+  CONGESTION = "norm_TRAF",
+  PARKING = "norm_PARCH",
+  TRUST3 = "norm_PUNTIFI10",
+  TRUST1 = "norm_PUNTIFI1",
+  TRUST2 = "norm_PUNTIFI8",
+  AFFORDABILITY1 = "norm_inv_RISEC",
+  AFFORDABILITY2 = "norm_inv_SITE"
+)
+
+avq_scaled_renamed <- avq_scaled %>% 
+  rename(!!!rename_vec)
+
+# SEM MODEL (OARC stats, 2025; Lavaan.org, 2025)
+model_new <- '
+  Perceived_accessibility =~ WAITING + SPEED + SEATS + TIME + COST + PUNCTUALITY + CLEAN + CONNECTION
+  Environment =~ CONGESTION + PARKING
+  Administration =~ TRUST3 + TRUST1 + TRUST2
+  Affordability =~ AFFORDABILITY1 + AFFORDABILITY2
+  Perceived_accessibility ~ Administration + Environment + Affordability
+'
+
+fit <- sem(model_new, data = avq_scaled_renamed, missing = "fiml")
+
+summary(fit, standardized = TRUE, fit.measures = TRUE)
+
+fitMeasures(fit)
+
+# Plot (Lishinski, 2024)
+lavaanPlot(model = fit,
+           node_options = list(shape = "box", fontname = "Helvetica", fontsize = 14),
+           edge_options = list(color = "black", lty = 1, lwd = 1.5),
+           coefs = TRUE,     
+           stand = FALSE)   
+
+#  CORRELATION (whalley, na)
+vars_cor <- avq_scaled_renamed %>% select(WAITING,SPEED ,SEATS ,TIME, COST ,PUNCTUALITY , CLEAN ,CONNECTION, CONGESTION , PARKING,  TRUST3  , TRUST1 , TRUST2, AFFORDABILITY1, AFFORDABILITY2
+)
+corr_res_spearman <- psych::corr.test(vars_cor, use = "pairwise", method = "spearman")
+print(corr_res_spearman$r)
+print(corr_res_spearman$p)
+
+# NORMALITY (Hallquist, 2017)
+print(psych::describe(vars_cor)[, c("skew", "kurtosis")])
+
+# CRONBACH ALPHA (RPUBS, na)
+alpha_sets <- list(
+  Perceived_accessibility = avq_scaled_renamed %>% select(WAITING , SPEED , SEATS , TIME , COST , PUNCTUALITY , CLEAN , CONNECTION),
+  Affordability = avq_scaled_renamed %>% select(AFFORDABILITY2, AFFORDABILITY1 ),
+  environment = avq_scaled_renamed %>% select( CONGESTION, PARKING),
+  Administration = avq_scaled_renamed %>% select(TRUST3, TRUST1, TRUST2)
+)
+alphas <- lapply(alpha_sets, psych::alpha)
+alpha_results <- lapply(alphas, function(a) a$total$raw_alpha)
+print(alpha_results)
+
+
+# COMPOSITE RELIABILITY E AVE (JORGENSEN, 2015)
+model_measurement <- '
+ Perceived_accessibility =~ WAITING + SPEED + SEATS + TIME + COST + PUNCTUALITY + CLEAN + CONNECTION
+  Environment =~ CONGESTION + PARKING
+  Administration =~ TRUST3 + TRUST1 + TRUST2
+  Affordability =~ AFFORDABILITY1 + AFFORDABILITY2
+'
+
+fit_measurement <- sem(model_measurement, data = avq_scaled_renamed, missing = "fiml")
+
+library(semTools)
+compRelSEM(fit_measurement)
+AVE(fit_measurement)
+
+
+#R-Squared (RDRR.IO, na)
+r2_values <- inspect(fit, "r2")
+print(r2_values)
+
+#other measures (STATISTIKA, 2025)
+
+cfi <- fitMeasures(fit, "cfi")
+df_model <- fitMeasures(fit, "df")
+df_baseline <- fitMeasures(fit, "baseline.df")
+print(cfi)
+print(df_model)
+print(df_baseline)
+
+pcfi <- cfi * (df_model / df_baseline)
+pcfi
+
+
+#VIF (Bhale and Harpreet, 2024)
+
+vars <- c(vars <- c("WAITING", "SPEED", "SEATS", "TIME", "COST", "PUNCTUALITY", "CLEAN", "CONNECTION", "CONGESTION", "PARKING", "TRUST3", "TRUST1", "TRUST2", "AFFORDABILITY1", "AFFORDABILITY2")
+)
+
+calc_all_vif <- function(data, variables) {
+  vif_results <- numeric(length(variables))
+  names(vif_results) <- variables
+  
+  for (var in variables) {
+    predictors <- setdiff(variables, var)
+    formula <- as.formula(paste(var, "~", paste(predictors, collapse = " + ")))
+    lm_model <- lm(formula, data = data)
+    
+    
+    r2 <- summary(lm_model)$r.squared
+    
+    
+    vif_results[var] <- 1 / (1 - r2)
+  }
+  
+  return(vif_results)
+}
+
+vif_all <- calc_all_vif(avq_scaled_renamed, vars)
+print(vif_all)
+
+# List of references
+# BHALE U. A., and Harpreet S. B. 2024. What is mean by Multicollinearity in SEM? 
+#URL: https://www.researchgate.net/publication/377691806
+
+# JORGENSEN T. D. 2015. SemTools: Useful Tools for Structural Equation Modeling. 
+#URL:https://cran.r-project.org/web/packages/semTools/semTools.pdf
+
+#HALLQUIST. 2017. Best practices in SEM PSY 597. 
+#URL: https://psu-psychology.github.io/psy-597-SEM/12_best_practices/best_practices.html
+
+#ISTAT. 2023. Aspetti della vita quotidiana, 2022.
+#URL:https://www.istat.it/microdati/aspetti-della-vita-quotidiana/
+
+# LAVAAN:ORG. 2025. Extracting information.
+#URL: https://lavaan.ugent.be/tutorial/inspect.html
+
+#LISHINSKI A. 2024. Intro to lavaanPlot. 
+#URL: https://cran.r-project.org/web/packages/lavaanPlot/vignettes/Intro_to_lavaanPlot.html
+
+# OARC stats. 2025. Introduction to Structural Equation Modeling (SEM) in R with lavaan. #URL:https://stats.oarc.ucla.edu/r/seminars/rsem/
+
+#RDDR. LavInspect: Inspect or extract information from a fitted lavaan object. 
+#URL: https://rdrr.io/cran/lavaan/man/lavInspect.html
+
+#RPUBS. Reliability analysis. 
+#URL: https://rpubs.com/hauselin/reliabilityanalysis
+
+# STATISTIKA. 2025. How to interpret SEM model fit results in AMOS. 
+
+# UNIVERSITY OF FLORIDA. Spearman correlation in R.
+#URL: https://users.phhp.ufl.edu/marsiske/r/AnalyzeCorrelateSpearman.html
+
+# WHALLEY B. Correlation. 
+#URL: https://benwhalley.github.io/just-enough-r/correlations.html 
+
+
+
